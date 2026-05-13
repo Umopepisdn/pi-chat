@@ -15,6 +15,7 @@ import type {
 	GondolinConfig,
 	GondolinSecretConfig,
 	SlackAccountConfig,
+	SlackReplyMode,
 	TelegramAccountConfig,
 } from "../core/config-types.js";
 import type { DiscoveredChannel, DiscoveredRole, DiscoveredUser, DiscoverySnapshot } from "../core/discovery-types.js";
@@ -248,6 +249,7 @@ async function configureDiscoveredChannel(
 		name: channel.name,
 		dm: channel.dm,
 		access,
+		slack: account.service === "slack" ? { replyMode: current?.slack?.replyMode ?? "preserve" } : undefined,
 	};
 	await saveChatConfig(config);
 	await showNotice(ctx, "Channel configured", `Configured ${accountId}/${channelKey}`, "info");
@@ -266,6 +268,15 @@ async function configureConfiguredChannel(
 	while (true) {
 		const choice = await selectItem(ctx, `${accountId}/${channelKey}`, [
 			{ value: "access", label: "Edit access policy" },
+			...(account.service === "slack"
+				? [
+						{
+							value: "slack-reply-mode",
+							label: "Slack reply mode",
+							description: channel.slack?.replyMode ?? "preserve",
+						},
+					]
+				: []),
 			{ value: "secrets", label: "Secrets", description: secretSummary(channel.gondolin) },
 			{ value: "delete", label: "Delete channel", description: "Remove this configured channel" },
 			{ value: "back", label: "Back" },
@@ -280,6 +291,23 @@ async function configureConfiguredChannel(
 			);
 			if (!access) continue;
 			channel.access = access;
+			account.channels[channelKey] = channel;
+			await saveChatConfig(config);
+			await showNotice(ctx, "Channel updated", `Updated ${accountId}/${channelKey}`, "info");
+			continue;
+		}
+		if (choice === "slack-reply-mode" && account.service === "slack") {
+			const replyMode = await selectItem(ctx, "Slack reply mode", [
+				{
+					value: "preserve",
+					label: "Preserve",
+					description: "Reply in a thread only when the user mentioned the bot from a thread",
+				},
+				{ value: "thread", label: "Thread", description: "Always reply in or start a Slack thread" },
+				{ value: "channel", label: "Channel", description: "Always reply as a top-level channel message" },
+			]);
+			if (!replyMode) continue;
+			channel.slack = { ...(channel.slack ?? {}), replyMode: replyMode as SlackReplyMode };
 			account.channels[channelKey] = channel;
 			await saveChatConfig(config);
 			await showNotice(ctx, "Channel updated", `Updated ${accountId}/${channelKey}`, "info");

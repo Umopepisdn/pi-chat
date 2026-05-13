@@ -18,12 +18,19 @@ export interface GondolinConfig {
 	secrets?: Record<string, GondolinSecretConfig>;
 }
 
+export type SlackReplyMode = "preserve" | "thread" | "channel";
+
+export interface SlackChannelConfig {
+	replyMode?: SlackReplyMode;
+}
+
 export interface ConfiguredChannel {
 	id: string;
 	name?: string;
 	dm?: boolean;
 	access?: AccessPolicy;
 	gondolin?: GondolinConfig;
+	slack?: SlackChannelConfig;
 }
 
 export interface BaseAccountConfig {

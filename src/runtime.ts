@@ -60,6 +60,20 @@ function getLatestTriggerRecord(records: ChatLogRecord[], job: PendingJob): Inbo
 	return triggerRecord;
 }
 
+export function getTriggerReplyToMessageId(
+	conversation: ResolvedConversation,
+	triggerRecord: InboundMessageRecord | undefined,
+): string | undefined {
+	if (!triggerRecord) return undefined;
+	if (conversation.service !== "slack") return triggerRecord.messageId;
+	const replyMode = conversation.channel.slack?.replyMode ?? "preserve";
+	if (replyMode === "channel") return undefined;
+	const threadId =
+		triggerRecord.threadId && triggerRecord.threadId !== triggerRecord.messageId ? triggerRecord.threadId : undefined;
+	if (replyMode === "preserve") return threadId;
+	return threadId || triggerRecord.messageId;
+}
+
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -207,6 +221,7 @@ export class ConversationRuntime {
 			type: "inbound",
 			...buildBaseRecordFields(this.conversation, this.nextRecordId),
 			messageId,
+			threadId: normalized.threadId,
 			userId: normalized.userId,
 			userName: normalized.userName,
 			roleIds: normalized.roleIds,
@@ -242,7 +257,11 @@ export class ConversationRuntime {
 		if (!job) return undefined;
 		this.activeJob = job;
 		const triggerRecord = getLatestTriggerRecord(this.records, job);
-		return { job, prompt: this.buildPrompt(job), triggerMessageId: triggerRecord?.messageId };
+		return {
+			job,
+			prompt: this.buildPrompt(job),
+			triggerMessageId: getTriggerReplyToMessageId(this.conversation, triggerRecord),
+		};
 	}
 
 	private buildPrompt(job: PendingJob): string {
@@ -268,7 +287,7 @@ export class ConversationRuntime {
 				...buildBaseRecordFields(this.conversation, this.nextRecordId),
 				messageId: remoteMessageId || nextMessageId(this.conversation.service),
 				text: trimmed,
-				replyToMessageId: triggerRecord?.messageId,
+				replyToMessageId: getTriggerReplyToMessageId(this.conversation, triggerRecord),
 				jobId: job.jobId,
 				attachments: attachmentPaths?.length ? [...attachmentPaths] : undefined,
 			} as const;

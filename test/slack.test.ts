@@ -1,7 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import type { ResolvedConversation, SlackAccountConfig } from "../src/core/config-types.js";
 import { isSupportedSlackSocketEvent, slackMessageEventToInput } from "../src/live/slack.js";
+import { getTriggerReplyToMessageId } from "../src/runtime.js";
+import type { InboundMessageRecord, ResolvedConversation, SlackAccountConfig } from "../types.js";
 
 function conversation(overrides: Partial<ResolvedConversation> = {}): ResolvedConversation {
 	const account: SlackAccountConfig = {
@@ -68,3 +69,57 @@ test("Slack socket mode accepts app mention events", () => {
 		true,
 	);
 });
+
+test("Slack preserve reply mode only replies in existing threads", () => {
+	const topLevel = inboundRecord({ messageId: "100.1" });
+	const threaded = inboundRecord({ messageId: "101.1", threadId: "100.1" });
+
+	assert.equal(
+		getTriggerReplyToMessageId(conversation({ channel: { id: "C1", slack: { replyMode: "preserve" } } }), topLevel),
+		undefined,
+	);
+	assert.equal(
+		getTriggerReplyToMessageId(conversation({ channel: { id: "C1", slack: { replyMode: "preserve" } } }), threaded),
+		"100.1",
+	);
+});
+
+test("Slack reply modes can force thread or channel replies", () => {
+	const record = inboundRecord({ messageId: "100.1", threadId: "99.1" });
+
+	assert.equal(
+		getTriggerReplyToMessageId(conversation({ channel: { id: "C1", slack: { replyMode: "thread" } } }), record),
+		"99.1",
+	);
+	assert.equal(
+		getTriggerReplyToMessageId(conversation({ channel: { id: "C1", slack: { replyMode: "channel" } } }), record),
+		undefined,
+	);
+	assert.equal(
+		getTriggerReplyToMessageId(
+			conversation({ channel: { id: "C1", slack: { replyMode: "thread" } } }),
+			inboundRecord({ messageId: "100.1" }),
+		),
+		"100.1",
+	);
+});
+
+function inboundRecord(overrides: Partial<InboundMessageRecord>): InboundMessageRecord {
+	return {
+		type: "inbound",
+		recordId: 1,
+		timestamp: "2026-01-01T00:00:00.000Z",
+		service: "slack",
+		accountId: "slack-team",
+		channelKey: "general",
+		channelId: "C1",
+		scope: "channel",
+		messageId: "100.1",
+		userId: "U1",
+		text: "hi",
+		mentionedBot: true,
+		isBot: false,
+		attachments: [],
+		...overrides,
+	};
+}

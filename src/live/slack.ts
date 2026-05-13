@@ -160,6 +160,7 @@ export async function slackMessageEventToInput(
 	const text = normalizeSlackText(event.text || "");
 	return {
 		messageId: event.ts,
+		...(event.thread_ts ? { threadId: event.thread_ts } : {}),
 		userId: event.user,
 		userName: event.user_profile?.display_name || event.user_profile?.real_name || event.user_profile?.name,
 		text,
