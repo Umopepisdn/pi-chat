@@ -60,6 +60,11 @@ interface SlackUser {
 	profile?: { display_name?: string; real_name?: string };
 }
 
+interface SlackUsersListResponse {
+	members?: SlackUser[];
+	response_metadata?: { next_cursor?: string };
+}
+
 interface SlackFile {
 	id?: string;
 	name?: string;
@@ -150,6 +155,7 @@ async function downloadSlackFiles(
 export async function slackMessageEventToInput(
 	conversation: ResolvedConversation,
 	event: SlackMessageEvent,
+	userNames?: ReadonlyMap<string, string>,
 ): Promise<InboundMessageInput | undefined> {
 	const account = conversation.account as SlackAccountConfig;
 	if (event.channel !== conversation.channel.id) return undefined;
@@ -162,7 +168,11 @@ export async function slackMessageEventToInput(
 		messageId: event.ts,
 		...(event.thread_ts ? { threadId: event.thread_ts } : {}),
 		userId: event.user,
-		userName: event.user_profile?.display_name || event.user_profile?.real_name || event.user_profile?.name,
+		userName:
+			event.user_profile?.display_name ||
+			event.user_profile?.real_name ||
+			event.user_profile?.name ||
+			userNames?.get(event.user),
 		text,
 		mentionedBot:
 			textMentionsBot(event.text || "", account.botUsername, account.botUserId) ||
@@ -270,6 +280,21 @@ async function sendSlackMessage(
 	return firstMessageId || "";
 }
 
+function getSlackUserDisplayName(user: SlackUser): string {
+	return user.profile?.display_name || user.profile?.real_name || user.real_name || user.name || user.id;
+}
+
+async function fetchSlackUserNames(account: SlackAccountConfig): Promise<Map<string, string>> {
+	const userNames = new Map<string, string>();
+	let cursor: string | undefined;
+	do {
+		const page = await callSlack<SlackUsersListResponse>(account.botToken, "users.list", { limit: 200, cursor });
+		for (const user of page.members ?? []) userNames.set(user.id, getSlackUserDisplayName(user));
+		cursor = page.response_metadata?.next_cursor || undefined;
+	} while (cursor);
+	return userNames;
+}
+
 export function shouldProcessSlackMessageId(seenMessageIds: Set<string>, messageId: string): boolean {
 	if (seenMessageIds.has(messageId)) return false;
 	seenMessageIds.add(messageId);
@@ -298,6 +323,7 @@ async function catchUpSlack(
 	handlers: LiveConnectionHandlers,
 	afterTs?: string,
 	seenMessageIds?: Set<string>,
+	userNames?: ReadonlyMap<string, string>,
 ): Promise<string | undefined> {
 	let latestCursor = afterTs;
 	const allMessages: SlackMessageEvent[] = [];
@@ -316,7 +342,7 @@ async function catchUpSlack(
 			: undefined;
 	} while (cursor);
 	for (const message of allMessages.sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))) {
-		const input = await slackMessageEventToInput(conversation, message);
+		const input = await slackMessageEventToInput(conversation, message, userNames);
 		if (!input?.messageId) continue;
 		if (seenMessageIds && !shouldProcessSlackMessageId(seenMessageIds, input.messageId)) continue;
 		await handlers.onMessage(input, { messageId: input.messageId, cursor: input.messageId });
@@ -337,6 +363,12 @@ export async function connectSlackLive(
 	let lastCursor = resumeState?.cursor || resumeState?.messageId;
 	const seenMessageIds = new Set<string>();
 	if (lastCursor) seenMessageIds.add(lastCursor);
+	let userNames = new Map<string, string>();
+	void fetchSlackUserNames(account)
+		.then((names) => {
+			userNames = names;
+		})
+		.catch((error) => void handlers.onError(error instanceof Error ? error : new Error(String(error))));
 
 	const preview = new StreamingPreview(conversation.service, {
 		create: async (text, _parseMode, replyToMessageId) =>
@@ -354,7 +386,7 @@ export async function connectSlackLive(
 		}
 		const event = envelope.payload?.event;
 		if (!isSupportedSlackSocketEvent(envelope) || !event) return;
-		const input = await slackMessageEventToInput(conversation, event);
+		const input = await slackMessageEventToInput(conversation, event, userNames);
 		if (!input?.messageId) return;
 		if (!shouldProcessSlackMessageId(seenMessageIds, input.messageId)) return;
 		await handlers.onMessage(input, { messageId: input.messageId, cursor: input.messageId });
@@ -379,7 +411,7 @@ export async function connectSlackLive(
 		const ws = await openWebSocket(connection.url);
 		currentWs = ws;
 		attachSocketHandlers(ws);
-		lastCursor = await catchUpSlack(conversation, account, handlers, lastCursor, seenMessageIds);
+		lastCursor = await catchUpSlack(conversation, account, handlers, lastCursor, seenMessageIds, userNames);
 	};
 
 	const reconnectLoop = async (): Promise<void> => {

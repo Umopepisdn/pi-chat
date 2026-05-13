@@ -52,17 +52,34 @@ test("Slack message events normalize to inbound input", async () => {
 		user: "U1",
 		text: "<@UBOT> please check <https://example.com|this link>",
 		ts: "1710000000.000100",
+		user_profile: { real_name: "Ada Lovelace" },
 	});
 
 	assert.deepEqual(input, {
 		messageId: "1710000000.000100",
 		userId: "U1",
-		userName: undefined,
+		userName: "Ada Lovelace",
 		text: "@UBOT please check this link (https://example.com)",
 		mentionedBot: true,
 		isBot: false,
 		attachments: [],
 	});
+});
+
+test("Slack user names can be resolved from cache", async () => {
+	const input = await slackMessageEventToInput(
+		conversation(),
+		{
+			type: "message",
+			channel: "C1",
+			user: "U1",
+			text: "hello",
+			ts: "1710000000.000100",
+		},
+		new Map([["U1", "Grace Hopper"]]),
+	);
+
+	assert.equal(input?.userName, "Grace Hopper");
 });
 
 test("Slack socket mode accepts app mention events", () => {
