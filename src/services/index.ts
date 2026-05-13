@@ -2,17 +2,20 @@ import type {
 	ChatAccountConfig,
 	ChatService,
 	DiscordAccountConfig,
+	SlackAccountConfig,
 	TelegramAccountConfig,
 } from "../core/config-types.js";
 import type { DiscoverySnapshot } from "../core/discovery-types.js";
 import { removeDiscoverySnapshot, saveDiscoverySnapshot } from "../discovery-store.js";
 import { discordDiscoveryProvider } from "./discord.js";
+import { slackDiscoveryProvider } from "./slack.js";
 import { telegramDiscoveryProvider } from "./telegram.js";
 import type { AccountDraft, DiscoveryProvider } from "./types.js";
 
 const providers: Record<ChatService, DiscoveryProvider> = {
 	telegram: telegramDiscoveryProvider,
 	discord: discordDiscoveryProvider,
+	slack: slackDiscoveryProvider,
 };
 
 export async function validateAccountDraft(draft: AccountDraft) {
@@ -38,6 +41,17 @@ export function updateAccountIdentityFromSnapshot(
 			...account,
 			botUserId: snapshot.identity.id,
 			botUsername: snapshot.identity.userName,
+		};
+		if (!next.name) next.name = snapshot.identity.name;
+		return next;
+	}
+	if (account.service === "slack") {
+		const next: SlackAccountConfig = {
+			...account,
+			botUserId: snapshot.identity.id,
+			botUsername: snapshot.identity.userName,
+			teamId: snapshot.identity.workspaceId || account.teamId,
+			teamName: snapshot.identity.workspaceName || account.teamName,
 		};
 		if (!next.name) next.name = snapshot.identity.name;
 		return next;

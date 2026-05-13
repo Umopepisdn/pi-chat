@@ -14,6 +14,7 @@ import type {
 	DiscordAccountConfig,
 	GondolinConfig,
 	GondolinSecretConfig,
+	SlackAccountConfig,
 	TelegramAccountConfig,
 } from "../core/config-types.js";
 import type { DiscoveredChannel, DiscoveredRole, DiscoveredUser, DiscoverySnapshot } from "../core/discovery-types.js";
@@ -22,6 +23,7 @@ import { loadDiscoverySnapshot } from "../discovery-store.js";
 import { refreshAccountSnapshot, updateAccountIdentityFromSnapshot } from "../services/index.js";
 import { selectItem, showNotice, toggleItems } from "./dialogs.js";
 import { createDiscordAccountWithGuidedSetup } from "./discord-setup.js";
+import { createSlackAccountWithGuidedSetup } from "./slack-setup.js";
 import { addTelegramObservedTargetToAccount, createTelegramAccountWithGuidedSetup } from "./telegram-setup.js";
 
 function accountDescription(account: ChatAccountConfig, snapshot: DiscoverySnapshot | undefined): string {
@@ -364,6 +366,67 @@ async function configureDiscordAccount(ctx: ExtensionContext, accountId: string)
 	}
 }
 
+async function configureSlackAccount(ctx: ExtensionContext, accountId: string): Promise<void> {
+	while (true) {
+		const config = await loadChatConfig();
+		const account = config.accounts[accountId] as SlackAccountConfig | undefined;
+		if (!account || account.service !== "slack") return;
+		const snapshot = await loadDiscoverySnapshot(accountId);
+		const configuredIds = new Set(Object.values(account.channels).map((channel) => channel.id));
+		const channelChoices = (snapshot?.channels ?? [])
+			.map((channel) => ({
+				value: channel.id,
+				label: `${configuredIds.has(channel.id) ? "●" : "○"} ${channel.name}`,
+				description: configuredIds.has(channel.id) ? "configured" : channel.dm ? "dm" : undefined,
+			}))
+			.sort((a, b) => {
+				const aConfigured = a.label.startsWith("●") ? 0 : 1;
+				const bConfigured = b.label.startsWith("●") ? 0 : 1;
+				return aConfigured - bConfigured || a.label.localeCompare(b.label);
+			});
+		const choice = await selectItem(ctx, `${accountId} (${account.teamName ?? "Slack"})`, [
+			{ value: "secrets", label: "Secrets", description: secretSummary(account.gondolin) },
+			{ value: "delete", label: "Delete account", description: "Remove account and all configured channels" },
+			{
+				value: "refresh",
+				label: "Refresh channels",
+				description: snapshot?.fetchedAt ? `Last fetched ${snapshot.fetchedAt}` : "No snapshot yet",
+			},
+			...channelChoices,
+			{ value: "back", label: "Back" },
+		]);
+		if (!choice || choice === "back") return;
+		if (choice === "secrets") {
+			await configureSecrets(ctx, `${accountId} secrets`, account.gondolin, async (next) => {
+				account.gondolin = next;
+				config.accounts[accountId] = account;
+				await saveChatConfig(config);
+			});
+			continue;
+		}
+		if (choice === "delete") {
+			const ok = await ctx.ui.confirm("Delete account", `Delete ${accountId} and all configured channels?`);
+			if (!ok) continue;
+			delete config.accounts[accountId];
+			await saveChatConfig(config);
+			await removeAccountStorage(accountId, ctx.cwd);
+			await showNotice(ctx, "Account deleted", `Deleted ${accountId}`, "info");
+			return;
+		}
+		if (choice === "refresh") {
+			const fresh = await refreshAccountSnapshot(accountId, account);
+			config.accounts[accountId] = updateAccountIdentityFromSnapshot(account, fresh);
+			await saveChatConfig(config);
+			if ((fresh.warnings?.length ?? 0) > 0) {
+				await showNotice(ctx, "Refresh warnings", (fresh.warnings ?? []).join("\n"), "warning");
+			}
+			continue;
+		}
+		const selectedChannel = snapshot?.channels.find((channel) => channel.id === choice);
+		if (selectedChannel) await configureDiscoveredChannel(ctx, config, accountId, selectedChannel, snapshot);
+	}
+}
+
 async function configureTelegramAccount(ctx: ExtensionContext, accountId: string): Promise<void> {
 	while (true) {
 		const config = await loadChatConfig();
@@ -424,6 +487,7 @@ async function configureAccount(ctx: ExtensionContext, accountId: string): Promi
 	const account = config.accounts[accountId];
 	if (!account) return;
 	if (account.service === "discord") return configureDiscordAccount(ctx, accountId);
+	if (account.service === "slack") return configureSlackAccount(ctx, accountId);
 	if (account.service === "telegram") return configureTelegramAccount(ctx, accountId);
 }
 
@@ -446,7 +510,7 @@ export async function runChatConfigUI(ctx: ExtensionContext): Promise<void> {
 				label: accountId,
 				description: accountDescription(config.accounts[accountId], snapshot),
 			})),
-			{ value: "__create__", label: "+ Create account", description: "Create a Telegram or Discord account" },
+			{ value: "__create__", label: "+ Create account", description: "Create a Telegram, Discord, or Slack account" },
 		]);
 		if (!choice) return;
 		if (choice === "__secrets__") {
@@ -460,10 +524,16 @@ export async function runChatConfigUI(ctx: ExtensionContext): Promise<void> {
 			const serviceChoice = await selectItem(ctx, "Create account", [
 				{ value: "telegram", label: "Telegram" },
 				{ value: "discord", label: "Discord" },
+				{ value: "slack", label: "Slack" },
 			]);
 			if (!serviceChoice) continue;
 			if (serviceChoice === "telegram") {
 				const accountId = await createTelegramAccountWithGuidedSetup(ctx, config);
+				if (accountId) await configureAccount(ctx, accountId);
+				continue;
+			}
+			if (serviceChoice === "slack") {
+				const accountId = await createSlackAccountWithGuidedSetup(ctx, config);
 				if (accountId) await configureAccount(ctx, accountId);
 				continue;
 			}
