@@ -270,6 +270,20 @@ async function sendSlackMessage(
 	return firstMessageId || "";
 }
 
+export function shouldProcessSlackMessageId(seenMessageIds: Set<string>, messageId: string): boolean {
+	if (seenMessageIds.has(messageId)) return false;
+	seenMessageIds.add(messageId);
+	return true;
+}
+
+export function getSlackReconnectDelayMs(attempt: number): number {
+	return Math.min(30000, 1000 * 2 ** Math.max(0, attempt));
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function openWebSocket(url: string): Promise<WebSocket> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(url);
@@ -283,7 +297,9 @@ async function catchUpSlack(
 	account: SlackAccountConfig,
 	handlers: LiveConnectionHandlers,
 	afterTs?: string,
-): Promise<void> {
+	seenMessageIds?: Set<string>,
+): Promise<string | undefined> {
+	let latestCursor = afterTs;
 	const allMessages: SlackMessageEvent[] = [];
 	let cursor: string | undefined;
 	do {
@@ -301,9 +317,12 @@ async function catchUpSlack(
 	} while (cursor);
 	for (const message of allMessages.sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))) {
 		const input = await slackMessageEventToInput(conversation, message);
-		if (!input) continue;
+		if (!input?.messageId) continue;
+		if (seenMessageIds && !shouldProcessSlackMessageId(seenMessageIds, input.messageId)) continue;
 		await handlers.onMessage(input, { messageId: input.messageId, cursor: input.messageId });
+		latestCursor = input.messageId;
 	}
+	return latestCursor;
 }
 
 export async function connectSlackLive(
@@ -312,10 +331,13 @@ export async function connectSlackLive(
 	resumeState?: ResumeState,
 ): Promise<LiveConnection> {
 	const account = conversation.account as SlackAccountConfig;
-	const connection = await callSlack<SlackConnectionOpenResponse>(account.appToken, "apps.connections.open");
-	const ws = await openWebSocket(connection.url);
-	await catchUpSlack(conversation, account, handlers, resumeState?.cursor || resumeState?.messageId);
-	await handlers.onCaughtUp();
+	let stopped = false;
+	let reconnecting = false;
+	let currentWs: WebSocket | undefined;
+	let lastCursor = resumeState?.cursor || resumeState?.messageId;
+	const seenMessageIds = new Set<string>();
+	if (lastCursor) seenMessageIds.add(lastCursor);
+
 	const preview = new StreamingPreview(conversation.service, {
 		create: async (text, _parseMode, replyToMessageId) =>
 			sendSlackMessage(account, conversation.channel.id, text, [], undefined, replyToMessageId),
@@ -323,34 +345,69 @@ export async function connectSlackLive(
 		delete: async (_id) => {},
 	});
 
-	let disconnected = false;
-	ws.on("message", (raw) => {
-		void (async () => {
+	const handleEnvelope = async (ws: WebSocket, raw: WebSocket.RawData): Promise<void> => {
+		const envelope = JSON.parse(raw.toString()) as SlackSocketEnvelope;
+		if (envelope.envelope_id) ws.send(JSON.stringify({ envelope_id: envelope.envelope_id }));
+		if (envelope.type === "disconnect") {
+			ws.close();
+			return;
+		}
+		const event = envelope.payload?.event;
+		if (!isSupportedSlackSocketEvent(envelope) || !event) return;
+		const input = await slackMessageEventToInput(conversation, event);
+		if (!input?.messageId) return;
+		if (!shouldProcessSlackMessageId(seenMessageIds, input.messageId)) return;
+		await handlers.onMessage(input, { messageId: input.messageId, cursor: input.messageId });
+		lastCursor = input.messageId;
+	};
+
+	const attachSocketHandlers = (ws: WebSocket) => {
+		ws.on("message", (raw) => {
+			void handleEnvelope(ws, raw).catch((error) =>
+				handlers.onError(error instanceof Error ? error : new Error(String(error))),
+			);
+		});
+		ws.on("error", (error) => void handlers.onError(error instanceof Error ? error : new Error(String(error))));
+		ws.on("close", () => {
+			if (stopped || currentWs !== ws) return;
+			void reconnectLoop();
+		});
+	};
+
+	const connectSocket = async (): Promise<void> => {
+		const connection = await callSlack<SlackConnectionOpenResponse>(account.appToken, "apps.connections.open");
+		const ws = await openWebSocket(connection.url);
+		currentWs = ws;
+		attachSocketHandlers(ws);
+		lastCursor = await catchUpSlack(conversation, account, handlers, lastCursor, seenMessageIds);
+	};
+
+	const reconnectLoop = async (): Promise<void> => {
+		if (reconnecting || stopped) return;
+		reconnecting = true;
+		let attempt = 0;
+		while (!stopped) {
+			await sleep(getSlackReconnectDelayMs(attempt++));
+			if (stopped) break;
 			try {
-				const envelope = JSON.parse(raw.toString()) as SlackSocketEnvelope;
-				if (envelope.envelope_id) ws.send(JSON.stringify({ envelope_id: envelope.envelope_id }));
-				const event = envelope.payload?.event;
-				if (!isSupportedSlackSocketEvent(envelope) || !event) return;
-				const input = await slackMessageEventToInput(conversation, event);
-				if (!input) return;
-				await handlers.onMessage(input, { messageId: input.messageId, cursor: input.messageId });
+				await connectSocket();
+				reconnecting = false;
+				return;
 			} catch (error) {
 				await handlers.onError(error instanceof Error ? error : new Error(String(error)));
 			}
-		})();
-	});
-	ws.on("error", (error) => void handlers.onError(error instanceof Error ? error : new Error(String(error))));
-	ws.on("close", () => {
-		if (disconnected) return;
-		disconnected = true;
-		void handlers.onDisconnect?.();
-	});
+		}
+		reconnecting = false;
+	};
+
+	await connectSocket();
+	await handlers.onCaughtUp();
 
 	return {
 		conversation,
 		disconnect: async () => {
-			disconnected = true;
-			ws.close();
+			stopped = true;
+			currentWs?.close();
 		},
 		sendImmediate: async (text, replyToMessageId) =>
 			postSlackMessage(account, conversation.channel.id, text, undefined, replyToMessageId),

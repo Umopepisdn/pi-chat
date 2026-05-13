@@ -1,6 +1,11 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { isSupportedSlackSocketEvent, slackMessageEventToInput } from "../src/live/slack.js";
+import {
+	getSlackReconnectDelayMs,
+	isSupportedSlackSocketEvent,
+	shouldProcessSlackMessageId,
+	slackMessageEventToInput,
+} from "../src/live/slack.js";
 import { getTriggerReplyToMessageId } from "../src/runtime.js";
 import type { InboundMessageRecord, ResolvedConversation, SlackAccountConfig } from "../types.js";
 
@@ -68,6 +73,21 @@ test("Slack socket mode accepts app mention events", () => {
 		}),
 		true,
 	);
+});
+
+test("Slack message ids are deduplicated", () => {
+	const seen = new Set<string>();
+
+	assert.equal(shouldProcessSlackMessageId(seen, "1778673622.974879"), true);
+	assert.equal(shouldProcessSlackMessageId(seen, "1778673622.974879"), false);
+	assert.equal(shouldProcessSlackMessageId(seen, "1778673641.708009"), true);
+});
+
+test("Slack reconnect backoff increases and caps", () => {
+	assert.equal(getSlackReconnectDelayMs(0), 1000);
+	assert.equal(getSlackReconnectDelayMs(1), 2000);
+	assert.equal(getSlackReconnectDelayMs(5), 30000);
+	assert.equal(getSlackReconnectDelayMs(20), 30000);
 });
 
 test("Slack preserve reply mode only replies in existing threads", () => {
