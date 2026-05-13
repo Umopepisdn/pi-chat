@@ -1,6 +1,6 @@
 # pi-chat
 
-A pi extension that bridges Discord and Telegram channels to a sandboxed pi session. Each connected channel gets its own [Gondolin](https://github.com/earendil-works/gondolin) micro-VM with persistent workspace, shared storage, memory, and skills.
+A pi extension that bridges Discord, Telegram, and Slack channels to a sandboxed pi session. Each connected channel gets its own [Gondolin](https://github.com/earendil-works/gondolin) micro-VM with persistent workspace, shared storage, memory, and skills.
 
 ## Quick Start
 
@@ -21,14 +21,14 @@ pi -e /path/to/pi-chat
 
 - [QEMU](https://www.qemu.org/) installed (`brew install qemu` on macOS)
 - Gondolin guest image (downloaded automatically on first connect)
-- A Discord bot token or Telegram bot token
+- A Discord bot token, Telegram bot token, or Slack bot/app token pair
 - `tmux` for multi-channel worker orchestration
 
 ---
 
 ## Features
 
-- **Discord server channels** and **Telegram DMs/groups**
+- **Discord server channels**, **Telegram DMs/groups**, and **Slack channels/DMs**
 - **Gondolin VM sandbox** per connection — tools run inside an isolated Alpine Linux micro-VM
 - **Persistent workspace** and **shared storage** across sessions
 - **Streamed preview** responses with edit-in-place
@@ -59,6 +59,144 @@ pi -e /path/to/pi-chat
 2. Run `/chat-config` → Create account → Telegram
 3. Enter your bot token
 4. Add DMs or groups through the guided setup
+
+### Slack
+
+pi-chat uses Slack **Socket Mode**, so you do not need to expose a public HTTP endpoint. The pi-chat process only needs outbound internet access and must keep running while the bot is connected.
+
+#### 1. Create a Slack app
+
+1. Open [Slack API Apps](https://api.slack.com/apps)
+2. Click **Create New App**
+3. Choose **From scratch**
+4. Select your workspace
+
+#### 2. Add bot token scopes
+
+In your Slack app settings:
+
+1. Go to **OAuth & Permissions**
+2. Under **Scopes** → **Bot Token Scopes**, add:
+
+```txt
+app_mentions:read
+channels:history
+channels:read
+chat:write
+files:read
+files:write
+users:read
+```
+
+For private channels, DMs, and multi-person DMs, also add:
+
+```txt
+groups:history
+groups:read
+im:history
+im:read
+mpim:history
+mpim:read
+```
+
+#### 3. Enable Socket Mode
+
+1. Go to **Socket Mode**
+2. Enable **Socket Mode**
+3. When Slack asks for an app-level token, create one with this scope:
+
+```txt
+connections:write
+```
+
+Copy the generated app-level token. It starts with `xapp-`.
+
+If you need to create it manually later, go to **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**.
+
+#### 4. Subscribe to bot events
+
+1. Go to **Event Subscriptions**
+2. Turn **Enable Events** on
+3. Under **Subscribe to bot events**, add:
+
+```txt
+app_mention
+message.channels
+```
+
+For DMs and private channels, also add whichever event types you need:
+
+```txt
+message.im
+message.groups
+message.mpim
+```
+
+#### 5. Install or reinstall the app
+
+1. Go to **OAuth & Permissions**
+2. Click **Install to Workspace** or **Reinstall to Workspace**
+3. Approve the requested permissions
+4. Copy the **Bot User OAuth Token**. It starts with `xoxb-`.
+
+Slack only applies new scopes/events after reinstalling the app, so repeat this step whenever you change scopes or event subscriptions.
+
+#### 6. Invite the bot to channels
+
+For each Slack channel you want pi-chat to monitor, invite the bot:
+
+```txt
+/invite @your_bot_name
+```
+
+#### 7. Configure pi-chat
+
+Run:
+
+```txt
+/chat-config
+```
+
+Then:
+
+1. Choose **Create account** → **Slack**
+2. Paste the Slack bot token (`xoxb-...`)
+3. Paste the Slack app-level token (`xapp-...`)
+4. Select the Slack channels/DMs to configure
+5. Configure access policy as needed
+
+#### 8. Start the worker
+
+For one channel, use:
+
+```txt
+/chat-connect
+```
+
+For all configured channels, use:
+
+```txt
+/chat-spawn-all
+```
+
+If you change Slack app settings or pi-chat config, restart workers:
+
+```txt
+/chat-kill-all
+/chat-spawn-all
+```
+
+#### Slack troubleshooting
+
+If mentions do not reach pi-chat:
+
+- Confirm the Slack worker is connected with `/chat-workers`
+- Confirm the bot was invited to the channel
+- Confirm **Socket Mode** is enabled
+- Confirm **Event Subscriptions** include `app_mention` and `message.channels`
+- Confirm the app was **reinstalled to the workspace** after scope/event changes
+- Confirm the channel and user are allowed in `/chat-config`
+- For private channels, make sure `groups:read`, `groups:history`, and `message.groups` are configured
 
 ---
 
